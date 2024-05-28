@@ -5,6 +5,7 @@ from .models import MenuItem, Category, Cart, Order, OrderItem
 from rest_framework.validators import UniqueValidator
 from django.contrib.auth.models import User
 from django.core.exceptions import ObjectDoesNotExist
+from django.shortcuts import get_object_or_404
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -86,19 +87,30 @@ class OrderItemSerializer(serializers.ModelSerializer):
     
 class OrderSerializer(serializers.ModelSerializer):
     delivery_crew = UserSerializer(read_only=True)
+    delivery_crew_id = serializers.IntegerField(write_only=True)
     user_id = serializers.IntegerField(write_only=True)
     status = serializers.BooleanField(default=0)
-    total = serializers.DecimalField(max_digits=6, decimal_places=2)
+    total = serializers.DecimalField(max_digits=6, decimal_places=2,)
     date = serializers.DateField(read_only=True)
     order_items = OrderItemSerializer(many=True, source='orderitem_set', read_only=True)
      
     class Meta:
         model = Order
-        fields = ['delivery_crew', 'user_id','status', 'total', 'date', 'order_items']
+        fields = ['delivery_crew', 'user_id','status', 'total', 'date', 'order_items', 'delivery_crew_id']
          
     def create(self, validated_data):
         validated_data['date'] = datetime.date.today()
         return super().create(validated_data)
+    
+    def validate_delivery_crew_id(self, value):
+        try:
+            # Check if a User object with the provided ID exists in the database
+            user = User.objects.get(pk=value)
+        except User.DoesNotExist:
+            # If the User object does not exist, raise a validation error
+            raise serializers.ValidationError("Delivery crew with this ID does not exist.")
+        return value
+
 
 
     

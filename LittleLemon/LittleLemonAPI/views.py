@@ -1,12 +1,11 @@
 from django.db import IntegrityError
-from django.shortcuts import render
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
-from .models import Category, MenuItem, Cart, Order, OrderItem
+from .models import MenuItem, Cart, Order
 from rest_framework.response import Response
 from rest_framework import status, viewsets
 from .serializers import *
-from django.shortcuts import get_object_or_404, get_list_or_404
+from django.shortcuts import get_object_or_404
 from django.contrib.auth.models import User, Group
 from .permissions import isManagerOrAdmin
 # Create your views here.
@@ -39,7 +38,9 @@ def single_item(request, id):
     #Patch user by id
     if request.method == 'PATCH':
         user = request.user
-        if user.groups.filter(name='Manager').exists():
+        if user.groups.filter(name='Manager').exists() or user.is_superuser:
+            if not request.data:
+                return Response({'detail':'No data provided'}, status.HTTP_400_BAD_REQUEST)
             item = get_object_or_404(MenuItem, pk=id)
             serializer = MenuItemSerializer(item, data=request.data, partial=True)
             if serializer.is_valid():
@@ -50,7 +51,7 @@ def single_item(request, id):
     #Put user by id
     if request.method == 'PUT':
         user = request.user
-        if user.groups.filter(name='Manager').exists():
+        if user.groups.filter(name='Manager').exists() or user.is_superuser:
             item = get_object_or_404(MenuItem, pk=id)
             serializer = MenuItemSerializer(item, data=request.data)
             if serializer.is_valid():
@@ -149,7 +150,6 @@ class CartViewSet(viewsets.ViewSet):
        
 class OrderViewSet(viewsets.ViewSet):
     permission_classes=[IsAuthenticated]
-    serializer_class = OrderSerializer
     def list(self, request):
         if  request.user.groups.filter(name='Manager').exists():
             orders = Order.objects.all()
@@ -178,7 +178,6 @@ class OrderViewSet(viewsets.ViewSet):
         order_serializer = OrderSerializer(data=order_data)
         order_serializer.is_valid(raise_exception=True)
         order_serializer.save()
-        
         order = order_serializer.instance
         order_item_data = []
         for cart_item in cart_items:
@@ -195,5 +194,47 @@ class OrderViewSet(viewsets.ViewSet):
         #Delete all the items from cart
         cart_items.delete()
         return Response({'message':'Order created successfully.'}, status.HTTP_201_CREATED)
+    def retrieve(self, request, pk=None):
+        userid = request.user.id
+        order = get_object_or_404(Order, id=pk)
+        if userid == order.user_id:
+            serialzier = OrderSerializer(order)
+            return Response(serialzier.data, status.HTTP_200_OK)
+        return Response({'message':'cant access this order'},status.HTTP_403_FORBIDDEN)
+    def patch(self, request, pk=None):
+        user = request.user
+        if user.groups.filter(name='Manager').exists() or user.is_superuser:
+            if not request.data.get('delivery_crew_id') and not request.data.get('status'):
+                return Response({'error':'Not provided data for "delivery_crew_id" or "status" fields'}, status.HTTP_400_BAD_REQUEST)
+            order = get_object_or_404(Order, id=pk)
+            serializer = OrderSerializer(order, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status.HTTP_200_OK)
+            return Response(serializer.errors, status.HTTP_400_BAD_REQUEST)
+        if user.groups.filter(name='Delivery Crew'):
+            if not request.data.get('status'):
+                return Response({'error':'Not provided data for "status" field'}, status.HTTP_400_BAD_REQUEST)
+            order = get_object_or_404(Order, id=pk)
+            if order.delivery_crew != request.user:
+                return Response({'message':'You dont have permission to access this order'}, status.HTTP_401_UNAUTHORIZED)
+            serializer = OrderSerializer(order, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response({'message':'Status changed'}, status.HTTP_200_OK)
+            return Response(serializer.errors, status.HTTP_400_BAD_REQUEST)
+        return Response({'detail':'You dont have permission to perform this action'}, status.HTTP_401_UNAUTHORIZED)
+    def delete(self, request, pk=None):
+        user = request.user
+        if user.groups.filter(name='Manager').exists() or user.is_superuser:
+            order = get_object_or_404(Order,id=pk)
+            order.delete()
+            return Response({'message':'Order successfully deleted'}, status.HTTP_200_OK)
+        return Response({'detail':'You dont have permission to perform this action'}, status.HTTP_401_UNAUTHORIZED)
+        
+        
+        
+        
+    
             
-            
+             
