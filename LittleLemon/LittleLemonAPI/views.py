@@ -4,10 +4,14 @@ from rest_framework.permissions import IsAuthenticated
 from .models import MenuItem, Cart, Order
 from rest_framework.response import Response
 from rest_framework import status, viewsets
+from rest_framework.pagination import PageNumberPagination
 from .serializers import *
 from django.shortcuts import get_object_or_404
 from django.contrib.auth.models import User, Group
 from .permissions import isManagerOrAdmin
+from django.core.paginator import Paginator, EmptyPage
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.filters import OrderingFilter, SearchFilter
 # Create your views here.
 
 @api_view(['GET','POST'])
@@ -15,7 +19,27 @@ from .permissions import isManagerOrAdmin
 def menu_items(request):
     #List all the menu items
     if request.method == 'GET':
-        items = MenuItem.objects.all()
+        items = MenuItem.objects.select_related('category').all()
+        category_name = request.query_params.get('category')
+        to_price = request.query_params.get('to_price')
+        search = request.query_params.get('search')
+        ordering = request.query_params.get('ordering')
+        perpage = request.query_params.get('perpage', default=100)
+        page = request.query_params.get('page', default=1)
+        if category_name:
+            items = items.filter(category__title = category_name)
+        if to_price:
+            items = items.filter(price__lte=to_price)
+        if search:
+            items = items.filter(title__contains=search)
+        if ordering:
+            ordering_fields = ordering.split(',')
+            items = items.order_by(*ordering_fields)
+        paginator = Paginator(items, per_page=perpage)
+        try:
+            items = paginator.page(number=page)
+        except EmptyPage:
+            items = []    
         serialized_data = MenuItemSerializer(items, many=True, context={'request': request})
         return Response(serialized_data.data, status.HTTP_200_OK)
     #Add the new user with POST method
@@ -104,14 +128,12 @@ def delivery_crews(request):
         return Response(users,status.HTTP_200_OK)
     #Add user to delivery crew group by POST method
     if request.method == 'POST':
-        try:
-            username = request.data['username']
-            user = get_object_or_404(User, username=username)
-            managers = Group.objects.get(name='Delivery Crew')
-            managers.user_set.add(user)
-            return Response({'message':'ok'},status.HTTP_201_CREATED)
-        except:
-             return Response({'message':'error'}, status.HTTP_400_BAD_REQUEST)
+        username = request.data.get('username')
+        user = get_object_or_404(User, username=username)
+        managers = Group.objects.get(name='Delivery Crew')
+        managers.user_set.add(user)
+        return Response({'message':'ok'},status.HTTP_201_CREATED)
+
          
 @api_view(['DELETE'])
 @permission_classes([isManagerOrAdmin])
@@ -143,28 +165,45 @@ class CartViewSet(viewsets.ViewSet):
             return Response({"error": "The combination of menu item and user already exists in the cart."}, status=status.HTTP_400_BAD_REQUEST)
     #Delete all the carts created by loggedin user
     def delete(self, request):
-        user_id = request.user.id 
-        carts = Cart.objects.filter(user_id=user_id)
+        carts = Cart.objects.filter(user_id=request.user_id)
         carts.delete()
         return Response({'message':'All menu items deleted'})
        
-class OrderViewSet(viewsets.ViewSet):
-    permission_classes=[IsAuthenticated]
-    def list(self, request):
-        if  request.user.groups.filter(name='Manager').exists():
-            orders = Order.objects.all()
-            serializer = OrderSerializer(orders, many=True)
-            return Response(serializer.data)
+class OrderViewSet(viewsets.ModelViewSet):
+    queryset = Order.objects.all()
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+    ordering_fields = ['total', 'date']
+    filter_backends = [DjangoFilterBackend, OrderingFilter, SearchFilter]
+    search_fields = ['user__username']
+    def list(self, request, *args, **kwargs):
+        if request.user.groups.filter(name='Manager').exists() or request.user.is_superuser:
+            orders = self.queryset
         elif request.user.groups.filter(name='Delivery Crew').exists():
-            user = request.user
-            orders = Order.objects.filter(delivery_crew=user)
-            serializer = OrderSerializer(orders, many=True)
-            return Response(serializer.data)
+            orders = Order.objects.filter(delivery_crew=request.user)
         else:
-            user_id = request.user.id
-            order = Order.objects.filter(user_id=user_id)
-            serializer = OrderSerializer(order, many=True)
-            return Response(serializer.data)
+            orders = Order.objects.filter(user=request.user)
+
+        #Apply ordering filter
+        ordering = self.request.query_params.get('ordering')
+        if ordering:
+            ordering_fields = ordering.split(',')
+            orders = orders.order_by(*ordering_fields)
+        else:
+            orders = orders.order_by('date')
+            
+        #Apply search filter
+        search = self.request.query_params.get('search')
+        if search:
+            search_filter = SearchFilter()
+            orders = search_filter.filter_queryset(self.request, orders, self)
+
+        # Apply pagination
+        paginator = PageNumberPagination()
+        paginated_orders = paginator.paginate_queryset(orders, request)
+        
+        serializer = self.get_serializer(paginated_orders, many=True)
+        return paginator.get_paginated_response(serializer.data)
     def create(self, request):
         user = request.user
         cart_items = Cart.objects.filter(user=user)
@@ -195,42 +234,36 @@ class OrderViewSet(viewsets.ViewSet):
         cart_items.delete()
         return Response({'message':'Order created successfully.'}, status.HTTP_201_CREATED)
     def retrieve(self, request, pk=None):
-        userid = request.user.id
         order = get_object_or_404(Order, id=pk)
-        if userid == order.user_id:
-            serialzier = OrderSerializer(order)
-            return Response(serialzier.data, status.HTTP_200_OK)
+        if request.user == order.user or request.user.groups.filter(name='Manager').exists() or request.user.is_superuser:
+            serializer = OrderSerializer(order)
+            return Response(serializer.data, status.HTTP_200_OK)
         return Response({'message':'cant access this order'},status.HTTP_403_FORBIDDEN)
     def patch(self, request, pk=None):
-        user = request.user
-        if user.groups.filter(name='Manager').exists() or user.is_superuser:
+        order = get_object_or_404(Order, id=pk)
+        if request.user.groups.filter(name='Manager').exists() or request.user.is_superuser:
             if not request.data.get('delivery_crew_id') and not request.data.get('status'):
                 return Response({'error':'Not provided data for "delivery_crew_id" or "status" fields'}, status.HTTP_400_BAD_REQUEST)
-            order = get_object_or_404(Order, id=pk)
             serializer = OrderSerializer(order, data=request.data, partial=True)
-            if serializer.is_valid():
-                serializer.save()
-                return Response(serializer.data, status.HTTP_200_OK)
-            return Response(serializer.errors, status.HTTP_400_BAD_REQUEST)
-        if user.groups.filter(name='Delivery Crew'):
-            if not request.data.get('status'):
-                return Response({'error':'Not provided data for "status" field'}, status.HTTP_400_BAD_REQUEST)
-            order = get_object_or_404(Order, id=pk)
-            if order.delivery_crew != request.user:
-                return Response({'message':'You dont have permission to access this order'}, status.HTTP_401_UNAUTHORIZED)
-            serializer = OrderSerializer(order, data=request.data, partial=True)
-            if serializer.is_valid():
-                serializer.save()
-                return Response({'message':'Status changed'}, status.HTTP_200_OK)
-            return Response(serializer.errors, status.HTTP_400_BAD_REQUEST)
-        return Response({'detail':'You dont have permission to perform this action'}, status.HTTP_401_UNAUTHORIZED)
+        elif request.user.groups.filter(name='Delivery Crew').exists():
+             if order.delivery_crew != request.user:
+                return Response({'message': 'You do not have permission to access this order'}, status=status.HTTP_401_UNAUTHORIZED)
+             if 'status' not in request.data:
+                return Response({'error': 'No data provided for "status" field'}, status=status.HTTP_400_BAD_REQUEST)
+             serializer = OrderSerializer(order, data=request.data, partial=True)
+        else:
+            return Response({'detail':'You dont have permission to perform this action'}, status.HTTP_401_UNAUTHORIZED)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status.HTTP_200_OK)
+        return Response(serializer.errors, status.HTTP_400_BAD_REQUEST)
     def delete(self, request, pk=None):
-        user = request.user
-        if user.groups.filter(name='Manager').exists() or user.is_superuser:
+        if request.user.groups.filter(name='Manager').exists() or request.user.is_superuser:
             order = get_object_or_404(Order,id=pk)
             order.delete()
             return Response({'message':'Order successfully deleted'}, status.HTTP_200_OK)
         return Response({'detail':'You dont have permission to perform this action'}, status.HTTP_401_UNAUTHORIZED)
+    
         
         
         

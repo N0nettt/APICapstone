@@ -87,7 +87,8 @@ class OrderItemSerializer(serializers.ModelSerializer):
     
 class OrderSerializer(serializers.ModelSerializer):
     delivery_crew = UserSerializer(read_only=True)
-    delivery_crew_id = serializers.IntegerField(write_only=True)
+    delivery_crew_id = serializers.IntegerField(write_only=True, required=False) 
+    user_username = serializers.SerializerMethodField(method_name='get_user_username')
     user_id = serializers.IntegerField(write_only=True)
     status = serializers.BooleanField(default=0)
     total = serializers.DecimalField(max_digits=6, decimal_places=2,)
@@ -96,16 +97,21 @@ class OrderSerializer(serializers.ModelSerializer):
      
     class Meta:
         model = Order
-        fields = ['delivery_crew', 'user_id','status', 'total', 'date', 'order_items', 'delivery_crew_id']
+        fields = ['user_username','delivery_crew', 'user_id','status', 'total', 'date', 'order_items', 'delivery_crew_id']
          
     def create(self, validated_data):
         validated_data['date'] = datetime.date.today()
         return super().create(validated_data)
     
+    def get_user_username(self, object):
+        return object.user.username
+    
     def validate_delivery_crew_id(self, value):
         try:
             # Check if a User object with the provided ID exists in the database
             user = User.objects.get(pk=value)
+            if not user.groups.filter(name='Delivery Crew').exists():
+                raise serializers.ValidationError('Delivery crew with this ID does not exist.')
         except User.DoesNotExist:
             # If the User object does not exist, raise a validation error
             raise serializers.ValidationError("Delivery crew with this ID does not exist.")

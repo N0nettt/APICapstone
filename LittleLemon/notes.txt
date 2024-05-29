@@ -1,0 +1,4 @@
+admin : superuser123  --- SuperUser
+Petar : userpetar123  --- DeliveryCrew
+N0net : userN0net123  --- Manager
+Customer : userCustomer123 --- Customer
